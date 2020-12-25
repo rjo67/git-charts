@@ -4,6 +4,12 @@ import (
 	"testing"
 )
 
+func TestCommitData(t *testing.T) {
+	c := makeCommitData(5)
+	c[0].nbrCommits++
+	c[0].authors["rjo"]++
+}
+
 func TestMonthsBetween(t *testing.T) {
 
 	data := []struct {
@@ -20,6 +26,8 @@ func TestMonthsBetween(t *testing.T) {
 		{"202001", "202112", 24},
 		// edge cases
 		{"201701", "201612", 0},
+		{"201701", "201702", 2}, // Feb only has 28/29 days
+		{"201702", "201704", 3}, // Apr only has 30 days
 	}
 
 	for _, test := range data {

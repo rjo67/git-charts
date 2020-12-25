@@ -4,14 +4,47 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
 	"github.com/go-echarts/go-echarts/v2/charts"
+	"github.com/go-echarts/go-echarts/v2/components"
 	"github.com/go-echarts/go-echarts/v2/opts"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
+
+func generatePieItems(commits []commitInfo) []opts.PieData {
+	data := make(map[string]int)
+
+	// iterate over commits and retrieve author info
+	totalCommits := 0
+	for _, commit := range commits {
+		for author, nbrCommits := range commit.authors {
+			//fmt.Printf("author, commits: %s:\t%d\n", author, nbrCommits)
+			data[author] += nbrCommits
+			totalCommits += nbrCommits
+		}
+	}
+	fmt.Printf("totalCommits: %d\n", totalCommits)
+
+	items := make([]opts.PieData, 0)
+	for k, val := range data {
+		items = append(items, opts.PieData{Name: k, Value: val})
+	}
+	return items
+}
+
+func pieBase(commits []commitInfo, timeFrame string, totalCommits int) *charts.Pie {
+	pie := charts.NewPie()
+	pie.SetGlobalOptions(
+		charts.WithTitleOpts(opts.Title{Title: fmt.Sprintf("Commits per author (%s in total) (%s)", totalCommits, timeFrame)}),
+	)
+
+	pie.AddSeries("pie", generatePieItems(commits))
+	return pie
+}
 
 // generate random data for bar chart
 func generateBarItems(commits []commitInfo) []opts.BarData {
@@ -22,12 +55,12 @@ func generateBarItems(commits []commitInfo) []opts.BarData {
 	return items
 }
 
-func barchart(outputFile string, startDate time.Time, commits []commitInfo) {
+func barchart(startDate time.Time, commits []commitInfo, timeFrame string, totalCommits int) *charts.Bar {
 	// create a new bar instance
 	bar := charts.NewBar()
 	// set some global options like Title/Legend/ToolTip or anything else
 	bar.SetGlobalOptions(charts.WithTitleOpts(opts.Title{
-		Title: "Git Commits powered by go-echarts",
+		Title: fmt.Sprintf("Git commits per month (%d in total) (%s)", totalCommits, timeFrame),
 	}))
 
 	// create X-Axis (months)
@@ -41,17 +74,28 @@ func barchart(outputFile string, startDate time.Time, commits []commitInfo) {
 	bar.SetXAxis(months).
 		AddSeries("Category A", generateBarItems(commits))
 		//AddSeries("Category B", generateBarItems())
-	f, _ := os.Create(outputFile)
-	bar.Render(f)
+
+	return bar
 }
 
+// stores information about a set of commits
 type commitInfo struct {
 	date       time.Time
 	nbrCommits int
+	authors    map[string]int
+}
+
+func makeCommitData(size int) []commitInfo {
+	commits := make([]commitInfo, size)
+	commits[0].authors = make(map[string]int)
+	for slot := range commits {
+		commits[slot].authors = make(map[string]int)
+	}
+	return commits
 }
 
 const (
-	dateFormat string = "20060102"
+	dateFormat string = "20060102 15:04:05"
 )
 
 var (
@@ -59,6 +103,7 @@ var (
 	verbose    bool
 	quiet      bool
 	start, end time.Time
+	timeFrame  string // string representation of start..end
 	outputFile string // name of the chart output file
 )
 
@@ -75,13 +120,22 @@ func monthsBetween(start, end time.Time) int {
 	return nbrMonths
 }
 
+// parseDate expects a 4-digit input string (year and month) and adds on the first or last day of the month.
+// An object representing this date is returned
 func parseDate(input string, startDate bool) (time.Time, error) {
-	if startDate {
-		input = input + "01"
-	} else {
-		input = input + "31"
+	startOfMonth, err := time.Parse(dateFormat, input+"01 00:00:00")
+	if err != nil {
+		return startOfMonth, err
 	}
-	return time.Parse(dateFormat, input)
+	if startDate {
+		return startOfMonth, err
+	}
+	endOfMonth, err := time.Parse(dateFormat, input+"01 23:59:59")
+	if err != nil {
+		return endOfMonth, err
+	}
+	endOfMonth = endOfMonth.AddDate(0, 1, -1)
+	return endOfMonth, err
 }
 
 func parseParameters() error {
@@ -148,22 +202,26 @@ func main() {
 	CheckIfError(err)
 
 	totalMonthsBetween := monthsBetween(start, end)
-	commits := make([]commitInfo, totalMonthsBetween)
+	timeFrame := fmt.Sprintf("from %s to %s", start.Format(dateFormat), end.Format(dateFormat))
+	commits := makeCommitData(totalMonthsBetween)
 	totalNbrCommits := 0
 
 	// iterate over the commits
 	err = cIter.ForEach(func(c *object.Commit) error {
 
-		totalNbrCommits++
-
-		if verbose {
-			fmt.Println(c)
-			fmt.Println(c.Author.When.Month())
-		}
-
 		monthSlot := monthsBetween(start, c.Author.When)
 		if monthSlot > 0 {
+
+			totalNbrCommits++
+
+			/*
+				if verbose {
+					fmt.Println(c)
+				}
+			*/
+
 			commits[monthSlot-1].nbrCommits++
+			commits[monthSlot-1].authors[c.Author.Name]++
 			/*
 				 getting the commit stats is very expensive...
 
@@ -178,6 +236,11 @@ func main() {
 					fmt.Println("---------")
 				}
 			*/
+
+		} else {
+			if verbose {
+				fmt.Printf("ignoring commit outside of required date: %s, %s\n", c.Hash, c.Author.When)
+			}
 		}
 
 		return nil
@@ -188,12 +251,21 @@ func main() {
 		fmt.Printf("processed %d commits over %d months\n", totalNbrCommits, totalMonthsBetween)
 	}
 	if verbose {
+		fmt.Println("Processed following commits:")
 		for index, commit := range commits {
 			fmt.Printf("%d: %d commits\n", index, commit.nbrCommits)
 		}
 	}
 
-	barchart(outputFile, start, commits)
+	page := components.NewPage()
+	page.AddCharts(
+		barchart(start, commits, timeFrame, totalNbrCommits),
+		pieBase(commits, timeFrame, totalNbrCommits),
+	)
+	f, err := os.Create(outputFile)
+	CheckIfError(err)
+	page.Render(io.MultiWriter(f))
+
 	if !quiet {
 		fmt.Printf("output in %s\n", outputFile)
 	}
