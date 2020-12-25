@@ -17,10 +17,10 @@ import (
 
 func generatePieItems(data programData) ([]opts.PieData, int, int) {
 	mydata := make(map[string]int)
-	totalCommits := 0 // just for sanity check
 	authorsBelowThreshold := 0
 
-	// iterate over commits and retrieve author info
+	totalCommits := 0 // just for sanity check
+	// merge per-month commit/author info into mydata
 	for _, commit := range data.commits {
 		for author, nbrCommits := range commit.authors {
 			//fmt.Printf("author, commits: %s:\t%d\n", author, nbrCommits)
@@ -37,7 +37,7 @@ func generatePieItems(data programData) ([]opts.PieData, int, int) {
 	// iterate over mydata and combine entries < threshold into one entry
 	for author, val := range mydata {
 		if val < data.threshold {
-			mydata["___others___"] += val
+			mydata["___others"] += val
 			delete(mydata, author)
 			authorsBelowThreshold++
 			//fmt.Printf("deleted author %s with %d commits\n", author, val)
@@ -60,12 +60,17 @@ func pieBase(data programData) *charts.Pie {
 		Subtitle: fmt.Sprintf("%d commits, %d authors (%d below threshold '%d')", data.totalCommits, totalNbrAuthors, authorsBelowThreshold, data.threshold),
 	}))
 
-	pie.AddSeries("pie", pieData)
+	pie.AddSeries("pie", pieData).SetSeriesOptions(charts.WithLabelOpts(
+		opts.Label{
+			Show:      true,
+			Formatter: "{b}: {c}",
+		}),
+	)
 	return pie
 }
 
-// generate random data for bar chart
-func generateBarItems(data programData) []opts.BarData {
+// generate commit-data for bar chart
+func generateCommitBarItems(data programData) []opts.BarData {
 	items := make([]opts.BarData, 0)
 	for _, val := range data.commits {
 		items = append(items, opts.BarData{Value: val.nbrCommits})
@@ -73,17 +78,31 @@ func generateBarItems(data programData) []opts.BarData {
 	return items
 }
 
-func barchart(startDate time.Time, data programData) *charts.Bar {
-	// create a new bar instance
+// generate author-data for bar chart
+func generateAuthorBarItems(data programData) []opts.BarData {
+	items := make([]opts.BarData, 0)
+	for _, val := range data.commits {
+		items = append(items, opts.BarData{Value: len(val.authors)})
+	}
+	return items
+}
+func barchart(data programData) *charts.Bar {
 	bar := charts.NewBar()
-	// set some global options like Title/Legend/ToolTip or anything else
-	bar.SetGlobalOptions(charts.WithTitleOpts(opts.Title{
-		Title:    "Git commits per month",
-		Subtitle: fmt.Sprintf("%d commits, %s", data.totalCommits, data.timeFrame),
-	}))
+	bar.SetGlobalOptions(
+		charts.WithTitleOpts(opts.Title{
+			Title:    "Git commits per month",
+			Subtitle: fmt.Sprintf("%d commits, %s", data.totalCommits, data.timeFrame),
+		}),
+		charts.WithDataZoomOpts(opts.DataZoom{
+			Type:  "slider",
+			Start: 0,
+			End:   100,
+		}),
+	)
 
 	// create X-Axis (months)
 	months := make([]string, 0)
+	startDate := data.start
 	for cnt := 0; cnt < len(data.commits); startDate = startDate.AddDate(0, 1, 0) {
 		cnt++
 		months = append(months, startDate.Format("Jan-06"))
@@ -91,23 +110,36 @@ func barchart(startDate time.Time, data programData) *charts.Bar {
 
 	// Put data into instance
 	bar.SetXAxis(months).
-		AddSeries("Category A", generateBarItems(data))
-		//AddSeries("Category B", generateBarItems())
+		AddSeries("Commits", generateCommitBarItems(data)).
+		//		, charts.WithBarChartOpts(
+		//			opts.BarChart{YAxisIndex: 0},
+		//		)).
+		AddSeries("Authors", generateAuthorBarItems(data)).
+		SetSeriesOptions(
+			charts.WithLabelOpts(opts.Label{
+				Show:     true,
+				Position: "top",
+			}),
+		)
+	bar.SetSeriesOptions(charts.WithMarkLineNameTypeItemOpts(
+		opts.MarkLineNameTypeItem{Name: "Maximum", Type: "max"},
+		opts.MarkLineNameTypeItem{Name: "Avg", Type: "average"},
+	))
 
 	return bar
 }
 
 // programData stores all info required to render the charts
 type programData struct {
-	threshold    int // below this, will group commits or authors instead of listing them singly
-	totalCommits int
+	start, end   time.Time
 	timeFrame    string // string representation of start..end
+	threshold    int    // below this, will group commits or authors instead of listing them singly
+	totalCommits int    // total commits found in the time frame
 	commits      []commitInfo
 }
 
 // commitInfo stores information about a set of commits (e.g. per month)
 type commitInfo struct {
-	date       time.Time
 	nbrCommits int
 	authors    map[string]int
 }
@@ -129,7 +161,6 @@ var (
 	data       programData
 	quiet      bool
 	repoName   string
-	start, end time.Time
 	verbose    bool
 )
 
@@ -193,17 +224,17 @@ func parseParameters() error {
 		return errors.New("wrong format for end date (must be 4 chars)")
 	}
 	var err error
-	start, err = parseDate(startStr, true)
+	data.start, err = parseDate(startStr, true)
 	if err != nil {
 		return err
 	}
-	end, err = parseDate(endStr, false)
+	data.end, err = parseDate(endStr, false)
 	if err != nil {
 		return err
 	}
 	//	fmt.Printf("got start: %s, end: %s\n", start, end)
 
-	if end.Before(start) {
+	if data.end.Before(data.start) {
 		return errors.New("end date is before start date")
 	}
 
@@ -227,17 +258,17 @@ func main() {
 	CheckIfError(err)
 
 	// ... retrieves the commit history
-	cIter, err := repo.Log(&git.LogOptions{From: ref.Hash(), Since: &start, Until: &end})
+	cIter, err := repo.Log(&git.LogOptions{From: ref.Hash(), Since: &data.start, Until: &data.end})
 	CheckIfError(err)
 
-	totalMonthsBetween := monthsBetween(start, end)
-	data.timeFrame = fmt.Sprintf("from %s to %s", start.Format("2006-01-02"), end.Format("2006-01-02"))
+	totalMonthsBetween := monthsBetween(data.start, data.end)
+	data.timeFrame = fmt.Sprintf("from %s to %s", data.start.Format("2006-01-02"), data.end.Format("2006-01-02"))
 	data.commits = makeCommitData(totalMonthsBetween)
 
 	// iterate over the commits
 	err = cIter.ForEach(func(c *object.Commit) error {
 
-		monthSlot := monthsBetween(start, c.Author.When)
+		monthSlot := monthsBetween(data.start, c.Author.When)
 		if monthSlot > 0 {
 
 			data.totalCommits++
@@ -287,7 +318,7 @@ func main() {
 
 	page := components.NewPage()
 	page.AddCharts(
-		barchart(start, data),
+		barchart(data),
 		pieBase(data),
 	)
 	f, err := os.Create(outputFile)
