@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/go-echarts/go-echarts/v2/charts"
@@ -129,8 +130,11 @@ func barchart(data programData) *charts.Bar {
 	return bar
 }
 
+type authorList []string
+
 // programData stores all info required to render the charts
 type programData struct {
+	authors      authorList
 	start, end   time.Time
 	timeFrame    string // string representation of start..end
 	threshold    int    // below this, will group commits or authors instead of listing them singly
@@ -195,6 +199,22 @@ func parseDate(input string, startDate bool) (time.Time, error) {
 	return endOfMonth, err
 }
 
+// String is the method to format the flag's value, part of the flag.Value interface.
+// The String method's output will be used in diagnostics.
+func (i *authorList) String() string {
+	return fmt.Sprint(*i)
+}
+
+// Set is the method to set the flag value, part of the flag.Value interface.
+// Set's argument is a string to be parsed to set the flag.
+// It's a comma-separated list, so we split it.
+func (i *authorList) Set(value string) error {
+	for _, author := range strings.Split(value, ",") {
+		*i = append(*i, author)
+	}
+	return nil
+}
+
 func parseParameters() error {
 	var startStr, endStr string
 
@@ -207,6 +227,7 @@ func parseParameters() error {
 	flag.BoolVar(&verbose, "v", false, "verbose")
 	flag.BoolVar(&quiet, "q", false, "extra quiet")
 	flag.IntVar(&data.threshold, "t", 3, "threshold for commits")
+	flag.Var(&data.authors, "a", "author list (optional, comma-separated and/or repeatable)")
 
 	flag.Parse()
 
@@ -215,13 +236,13 @@ func parseParameters() error {
 	}
 
 	if len(startStr) != 6 {
-		return errors.New("wrong format for start date (must be 4 chars)")
+		return errors.New("wrong format for start date (must be 6 chars)")
 	}
 	if endStr == "" {
 		// use current date
 		endStr = time.Now().Format("200601")
 	} else if len(endStr) != 6 {
-		return errors.New("wrong format for end date (must be 4 chars)")
+		return errors.New("wrong format for end date (must be 6 chars)")
 	}
 	var err error
 	data.start, err = parseDate(startStr, true)
@@ -268,8 +289,37 @@ func main() {
 	// iterate over the commits
 	err = cIter.ForEach(func(c *object.Commit) error {
 
-		monthSlot := monthsBetween(data.start, c.Author.When)
-		if monthSlot > 0 {
+		skipCommit := false
+		var monthSlot int
+
+		// filter on author(s)
+		if len(data.authors) != 0 {
+			matches := false
+			for _, author := range data.authors {
+				if strings.Contains(c.Author.Name, author) {
+					matches = true
+					break
+				}
+			}
+			if !matches {
+				skipCommit = true
+				if verbose {
+					fmt.Printf("skipped author: %s\n", c.Author.Name)
+				}
+			}
+		}
+
+		if !skipCommit {
+			monthSlot = monthsBetween(data.start, c.Author.When)
+			if monthSlot <= 0 {
+				skipCommit = true
+				if verbose {
+					fmt.Printf("ignoring commit outside of required date: %s, %s\n", c.Hash, c.Author.When)
+				}
+			}
+		}
+
+		if !skipCommit {
 
 			data.totalCommits++
 
@@ -296,10 +346,6 @@ func main() {
 				}
 			*/
 
-		} else {
-			if verbose {
-				fmt.Printf("ignoring commit outside of required date: %s, %s\n", c.Hash, c.Author.When)
-			}
 		}
 
 		return nil
